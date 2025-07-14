@@ -1,0 +1,198 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+
+// Configurações de hardware (mantidas do seu código original)
+#define LED_SISTEMA 23
+#define SWITCH_POWER 22
+#define LED_AQUECEDOR 18
+#define SWITCH_EMERGENCIA 19
+#define LED_SUJIDADE 5
+#define POT_TEMPERATURA 34
+#define POT_SUJIDADE 35
+
+// Configurações do sistema
+#define TEMP_MINIMA 25.0
+#define SUJIDADE_MAX 70
+#define INTERVALO_LEITURA 1000
+#define INTERVALO_ENVIO 5000  // Envia dados a cada 5 segundos
+
+// Configurações de rede (ATUALIZE COM SEUS DADOS)
+#define WIFI_SSID "Wokwi-GUEST"
+#define WIFI_PASSWORD ""
+#define SERVER_URL "http://galdinomarcos.pythonanywhere.com/api/data/"
+
+// Variáveis do sistema
+bool sistemaLigado = false;
+bool emergenciaAtiva = false;
+bool aquecedorLigado = false;
+bool alertaSujidade = false;
+float temperatura = 0.0;
+float nivelSujidade = 0.0;
+unsigned long ultimaLeitura = 0;
+unsigned long ultimoEnvio = 0;
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Configuração de pinos (mantida do original)
+  pinMode(LED_SISTEMA, OUTPUT);
+  pinMode(SWITCH_POWER, INPUT_PULLUP);
+  pinMode(LED_AQUECEDOR, OUTPUT);
+  pinMode(SWITCH_EMERGENCIA, INPUT_PULLUP);
+  pinMode(LED_SUJIDADE, OUTPUT);
+  
+  // Estado inicial
+  digitalWrite(LED_SISTEMA, LOW);
+  digitalWrite(LED_AQUECEDOR, LOW);
+  digitalWrite(LED_SUJIDADE, LOW);
+  
+  // Conecta ao WiFi
+  conectarWiFi();
+  
+  Serial.println("Sistema Iniciado");
+  Serial.println("----------------");
+}
+
+void loop() {
+  // Leitura dos sensores (mantida do original)
+  if (millis() - ultimaLeitura > INTERVALO_LEITURA) {
+    temperatura = analogRead(POT_TEMPERATURA) / 4095.0 * 100.0;
+    nivelSujidade = analogRead(POT_SUJIDADE) / 4095.0 * 100.0;
+    
+    // Controle do alerta de sujidade
+    bool sujo = (nivelSujidade > SUJIDADE_MAX);
+    if (sujo != alertaSujidade) {
+      alertaSujidade = sujo;
+      digitalWrite(LED_SUJIDADE, alertaSujidade);
+      Serial.print("[SUJIDADE] ");
+      Serial.println(alertaSujidade ? "ALERTA: Necessário limpeza!" : "Nível normal");
+    }
+    
+    logStatus();
+    ultimaLeitura = millis();
+  }
+
+  // Controles do sistema (mantidos do original)
+  if (!digitalRead(SWITCH_POWER) != sistemaLigado) {
+    sistemaLigado = !digitalRead(SWITCH_POWER);
+    digitalWrite(LED_SISTEMA, sistemaLigado);
+    
+    if (sistemaLigado) {
+      Serial.println("[SISTEMA] Ligado");
+    } else {
+      desligarAquecedor();
+      Serial.println("[SISTEMA] Desligado");
+    }
+    delay(50);
+  }
+
+  // Verifica emergência
+  bool emergenciaAtual = !digitalRead(SWITCH_EMERGENCIA);
+  if (emergenciaAtual != emergenciaAtiva) {
+    emergenciaAtiva = emergenciaAtual;
+    
+    if (emergenciaAtiva) {
+      desligarAquecedor();
+      Serial.println("[EMERGÊNCIA] Ativada - Aquecedor desligado!");
+    } else {
+      Serial.println("[EMERGÊNCIA] Desativada - Retornando ao automático");
+      verificaTemperatura();
+    }
+    delay(50);
+  }
+
+  // Controle automático
+  if (sistemaLigado && !emergenciaAtiva) {
+    verificaTemperatura();
+  }
+
+  // NOVO: Envia dados para o servidor
+  if (millis() - ultimoEnvio > INTERVALO_ENVIO) {
+    enviarDados();
+    ultimoEnvio = millis();
+  }
+}
+
+// Funções originais mantidas
+void verificaTemperatura() {
+  bool precisaAquecer = (temperatura < TEMP_MINIMA);
+  if (precisaAquecer != aquecedorLigado) {
+    aquecedorLigado = precisaAquecer;
+    digitalWrite(LED_AQUECEDOR, aquecedorLigado);
+    Serial.print("[AQUECEDOR] ");
+    Serial.println(aquecedorLigado ? "Ligado (temp < 25°C)" : "Desligado (temp OK)");
+  }
+}
+
+void desligarAquecedor() {
+  aquecedorLigado = false;
+  digitalWrite(LED_AQUECEDOR, LOW);
+}
+
+void logStatus() {
+  Serial.print("Temp: ");
+  Serial.print(temperatura, 1);
+  Serial.print("°C | Suj: ");
+  Serial.print(nivelSujidade, 0);
+  Serial.print("% | Sistema: ");
+  Serial.print(sistemaLigado ? "LIGADO" : "DESLIGADO");
+  Serial.print(" | Aquecedor: ");
+  Serial.print(aquecedorLigado ? "ON" : "OFF");
+  Serial.print(" | Emerg: ");
+  Serial.print(emergenciaAtiva ? "ATIVA" : "INATIVA");
+  Serial.print(" | Limpeza: ");
+  Serial.println(alertaSujidade ? "NECESSÁRIA" : "OK");
+}
+
+// NOVAS FUNÇÕES PARA COMUNICAÇÃO COM O SERVIDOR
+
+void conectarWiFi() {
+  Serial.println("Conectando ao WiFi...");
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  
+  Serial.println("\nConectado! IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+void enviarDados() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(SERVER_URL);
+    http.addHeader("Content-Type", "application/json");
+    
+    // Cria o JSON com os dados
+    DynamicJsonDocument doc(256);
+    doc["temperatura"] = temperatura;
+    doc["sujidade"] = nivelSujidade;
+    doc["sistema_ligado"] = sistemaLigado;
+    doc["aquecedor_ligado"] = aquecedorLigado;
+    doc["emergencia_ativa"] = emergenciaAtiva;
+    doc["alerta_sujidade"] = alertaSujidade;
+    
+    String jsonPayload;
+    serializeJson(doc, jsonPayload);
+    
+    // Envia a requisição POST
+    int httpCode = http.POST(jsonPayload);
+    
+    if (httpCode > 0) {
+      Serial.printf("Dados enviados! Resposta: %d\n", httpCode);
+      if (httpCode == HTTP_CODE_OK) {
+        String response = http.getString();
+        Serial.println("Resposta do servidor: " + response);
+      }
+    } else {
+      Serial.printf("Erro no envio: %s\n", http.errorToString(httpCode).c_str());
+    }
+    
+    http.end();
+  } else {
+    Serial.println("WiFi desconectado");
+  }
+}
